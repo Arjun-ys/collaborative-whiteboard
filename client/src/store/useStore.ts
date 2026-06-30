@@ -14,6 +14,7 @@ interface WhiteboardState {
   userName: string;
   activeUsers: number;
   theme: 'light' | 'dark';
+  isStickySelected: boolean;
   
   setActiveTool: (tool: ToolType) => void;
   setStrokeColor: (color: string) => void;
@@ -26,6 +27,7 @@ interface WhiteboardState {
   setUserName: (name: string) => void;
   setActiveUsers: (count: number) => void;
   toggleTheme: () => void;
+  setIsStickySelected: (val: boolean) => void;
 }
 
 // Generate a random username if not set
@@ -50,7 +52,7 @@ const getInitialRoomId = () => {
 
 export const useStore = create<WhiteboardState>((set) => ({
   activeTool: 'select',
-  strokeColor: '#a855f7', // purple-500
+  strokeColor: '#f3f4f6', // light gray — visible on dark default background
   fillColor: 'transparent',
   strokeWidth: 4,
   fontSize: 24,
@@ -60,6 +62,7 @@ export const useStore = create<WhiteboardState>((set) => ({
   userName: getRandomName(),
   activeUsers: 1,
   theme: 'dark', // default theme is dark
+  isStickySelected: false,
 
   setActiveTool: (tool) => set({ activeTool: tool }),
   setStrokeColor: (color) => set({ strokeColor: color }),
@@ -71,25 +74,31 @@ export const useStore = create<WhiteboardState>((set) => ({
   setUserId: (id) => set({ userId: id }),
   setUserName: (name) => set({ userName: name }),
   setActiveUsers: (count) => set({ activeUsers: count }),
+  setIsStickySelected: (val) => set({ isStickySelected: val }),
   
   toggleTheme: () => set((state) => {
     const nextTheme = state.theme === 'light' ? 'dark' : 'light';
-    let nextStrokeColor = state.strokeColor;
-    let nextFillColor = state.fillColor;
 
-    // Toggle white/light gray <-> black/dark slate ink colors
-    if (nextTheme === 'light') {
-      if (state.strokeColor === '#f3f4f6' || state.strokeColor === '#ffffff') nextStrokeColor = '#1e293b';
-      if (state.fillColor === '#f3f4f6' || state.fillColor === '#ffffff') nextFillColor = '#1e293b';
-    } else {
-      if (state.strokeColor === '#1e293b') nextStrokeColor = '#f3f4f6';
-      if (state.fillColor === '#1e293b') nextFillColor = '#f3f4f6';
-    }
+    // Pairs of [darkModeColor, lightModeColor] to swap when toggling
+    const swapPairs: [string, string][] = [
+      ['#ffffff', '#000000'],   // pure white ↔ pure black
+      ['#f3f4f6', '#1e293b'],   // light gray ↔ dark slate (primary ink pair)
+      ['#f8fafc', '#0f172a'],   // near-white ↔ near-black
+      ['#e2e8f0', '#334155'],   // cool gray ↔ slate-700
+    ];
 
-    return { 
+    const swap = (color: string): string => {
+      for (const [dark, light] of swapPairs) {
+        if (nextTheme === 'light' && color === dark) return light;
+        if (nextTheme === 'dark'  && color === light) return dark;
+      }
+      return color; // any other color (purple, red, etc.) is left unchanged
+    };
+
+    return {
       theme: nextTheme,
-      strokeColor: nextStrokeColor,
-      fillColor: nextFillColor,
+      strokeColor: swap(state.strokeColor),
+      fillColor:   swap(state.fillColor),
     };
   }),
 }));

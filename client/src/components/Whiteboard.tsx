@@ -550,15 +550,62 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     canvas.requestRenderAll();
   }, [activeTool, strokeColor, strokeWidth]);
 
-  // Handle dynamic theme changes
+  // Handle dynamic theme changes — swap canvas background AND recolor existing "theme ink" objects
   useEffect(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
+
     const bg = theme === 'light' ? '#ffffff' : '#000000';
-    canvas.setBackgroundColor(bg, () => {
-      canvas.renderAll();
+    canvas.setBackgroundColor(bg, () => { canvas.renderAll(); });
+
+    // Color swap table: [darkColor, lightColor]
+    // Objects drawn in these colors will be recolored to match the new theme.
+    // Accent colors (purple, red, custom) are left untouched.
+    const swapPairs: [string, string][] = [
+      ['#ffffff', '#000000'],
+      ['#f3f4f6', '#1e293b'],
+      ['#f8fafc', '#0f172a'],
+      ['#e2e8f0', '#334155'],
+    ];
+
+    const swap = (color: string | undefined | null): string | null => {
+      if (!color) return null;
+      const c = color.toLowerCase();
+      for (const [dark, light] of swapPairs) {
+        if (theme === 'light' && c === dark)  return light;
+        if (theme === 'dark'  && c === light) return dark;
+      }
+      return null; // null = no swap needed
+    };
+
+    canvas.getObjects().forEach((obj) => {
+      let changed = false;
+
+      if (obj.type === 'path' || obj.type === 'rect' || obj.type === 'circle') {
+        const newStroke = swap(obj.stroke as string);
+        if (newStroke) { obj.set('stroke', newStroke); changed = true; }
+        const newFill = obj.fill !== 'transparent' ? swap(obj.fill as string) : null;
+        if (newFill) { obj.set('fill', newFill); changed = true; }
+      } else if (obj.type === 'i-text') {
+        const newFill = swap(obj.fill as string);
+        if (newFill) { obj.set('fill', newFill); changed = true; }
+      }
+      // Sticky notes (textbox) keep their locked yellow background + dark text — skip them
+
+      if (changed) {
+        obj.setCoords();
+        if (canvasObjectsMap && obj.id) {
+          canvasObjectsMap.set(
+            obj.id,
+            obj.toObject(['id', 'creatorId', 'backgroundColor', 'padding', 'shadow',
+                          '_isSticky', '_stickyBaseFontSize', '_stickyBaseWidth', '_stickyScale'])
+          );
+        }
+      }
     });
-  }, [theme]);
+
+    canvas.requestRenderAll();
+  }, [theme, canvasObjectsMap]);
 
   // Sync strokeColor, fillColor, strokeWidth, and fontSize updates dynamically to selected canvas elements
   useEffect(() => {
