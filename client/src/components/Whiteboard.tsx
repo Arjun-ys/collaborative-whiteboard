@@ -31,6 +31,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     fontSize,
     userId,
     theme,
+    setIsStickySelected,
   } = useStore();
 
   // Internal states for shape creation
@@ -168,26 +169,44 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       }
     });
 
-    // Adapt Sticky Note font size dynamically when scaling handles are dragged
-    canvas.on('object:scaling', (e) => {
+    // Bake sticky note scale AFTER the drag ends (object:scaling mid-drag resets break the handle)
+    canvas.on('object:scaled', (e) => {
       const obj = e.target;
       if (!obj || obj.type !== 'textbox') return;
 
       const textbox = obj as fabric.Textbox;
-      const scaleX = textbox.scaleX || 1;
+      const scaleX = textbox.scaleX ?? 1;
+      const scaleY = textbox.scaleY ?? 1;
+      // Use the larger axis so the note stays roughly square
+      const scale = Math.max(scaleX, scaleY);
 
-      const currentFontSize = textbox.fontSize || 18;
-      const newFontSize = Math.max(10, Math.round(currentFontSize * scaleX));
+      const baseFontSize = textbox.fontSize ?? 16;
+      const newFontSize = Math.max(10, Math.round(baseFontSize * scale));
+      const newWidth   = Math.round((textbox.width  ?? 200) * scaleX);
+      const newHeight  = Math.round((textbox.height ?? 200) * scaleY);
 
       textbox.set({
         fontSize: newFontSize,
-        width: (textbox.width || 160) * scaleX,
-        scaleX: 1,
-        scaleY: 1,
+        width:    newWidth,
+        height:   newHeight,
+        scaleX:   1,
+        scaleY:   1,
       });
-
       textbox.setCoords();
+      canvas.requestRenderAll();
+
+      // Push the resized note dimensions to Yjs so collaborators see the change
+      canvas.fire('object:modified', { target: textbox });
     });
+
+    // Track selections to show/hide PropertiesPanel fill options dynamically
+    const updateSelectionState = () => {
+      const activeObj = canvas.getActiveObject();
+      setIsStickySelected(!!(activeObj && activeObj.type === 'textbox'));
+    };
+    canvas.on('selection:created', updateSelectionState);
+    canvas.on('selection:updated', updateSelectionState);
+    canvas.on('selection:cleared', () => setIsStickySelected(false));
 
     // Mouse events for shape creation
     canvas.on('mouse:down', (options) => {
@@ -261,18 +280,20 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         const sticky = new fabric.Textbox('Write note...', {
           left: pointer.x,
           top: pointer.y,
-          width: 220,
-          fontSize: 18,
+          width: 200,
+          height: 200,
+          fontSize: 16,
           fontFamily: 'Inter, sans-serif',
-          fill: '#1e293b', // clean dark slate text for readability
-          backgroundColor: '#fef08a', // standard sticky yellow
-          padding: 16,
+          fill: '#1e293b',
+          backgroundColor: '#fef08a',
+          padding: 20,
           splitByGrapheme: true,
+          lockScalingFlip: true,
           shadow: new fabric.Shadow({
-            color: 'rgba(0,0,0,0.12)',
-            blur: 8,
-            offsetX: 3,
-            offsetY: 3,
+            color: 'rgba(0,0,0,0.1)',
+            blur: 10,
+            offsetX: 4,
+            offsetY: 4,
           }),
           id: crypto.randomUUID(),
           creatorId: currentUserId,
