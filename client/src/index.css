@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    @apply font-sans bg-white text-slate-900 dark:bg-black dark:text-slate-50 transition-colors duration-300;
+  }
+
+  /* Remove jarring browser default focus borders for premium SaaS look */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-purple-500/80 ring-offset-2 dark:ring-offset-slate-950;
+  }
+
+  /* Smooth animations by default on interactive elements */
+  button, input, select, textarea {
+    @apply transition-all duration-200 ease-in-out;
+  }
+
+  canvas {
+    @apply block;
+  }
+}
+
+/* Custom range styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  @apply h-1 bg-slate-200 dark:bg-slate-800 rounded-lg outline-none cursor-pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  @apply w-3.5 h-3.5 bg-purple-600 dark:bg-purple-400 rounded-full cursor-pointer shadow-md border border-white dark:border-slate-900 hover:scale-110 transition-transform duration-100;
+}

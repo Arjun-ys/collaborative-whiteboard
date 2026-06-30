@@ -1,0 +1,36 @@
+# Dependency directories
+node_modules/
+
+# Production builds
+dist/
+build/
+
+# Local database file storage
+db_data/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE and agent generation paths
+.gemini/
+.agents/
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs and diagnostic datasets
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
