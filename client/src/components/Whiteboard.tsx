@@ -124,7 +124,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
       console.log(`[Canvas] Object added locally: ${obj.type} (ID: ${obj.id})`);
       if (canvasObjectsMap) {
-        canvasObjectsMap.set(obj.id, obj.toObject(['id', 'creatorId', 'backgroundColor', 'padding', 'shadow']));
+        canvasObjectsMap.set(obj.id, obj.toObject(['id', 'creatorId', 'backgroundColor', 'padding', 'shadow', '_isSticky', '_stickyBaseFontSize', '_stickyBaseWidth', '_stickyScale']));
       }
       if (onLocalObjectAdded) {
         onLocalObjectAdded(obj);
@@ -137,7 +137,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       if (!obj) return;
       console.log(`[Canvas] Object modified locally: ${obj.type} (ID: ${obj.id})`);
       if (canvasObjectsMap) {
-        canvasObjectsMap.set(obj.id, obj.toObject(['id', 'creatorId', 'backgroundColor', 'padding', 'shadow']));
+        canvasObjectsMap.set(obj.id, obj.toObject(['id', 'creatorId', 'backgroundColor', 'padding', 'shadow', '_isSticky', '_stickyBaseFontSize', '_stickyBaseWidth', '_stickyScale']));
       }
       if (onLocalObjectModified) {
         onLocalObjectModified(obj);
@@ -169,33 +169,39 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       }
     });
 
-    // Bake sticky note scale AFTER the drag ends (object:scaling mid-drag resets break the handle)
+    // Bake sticky note scale AFTER the drag ends.
+    // Key fix: always derive new values from _stickyBase* (set at creation and updated after
+    // each bake) so multiple sequential resizes never compound into runaway font growth.
+    // Use Math.max(scaleX, scaleY) so corner drags expand BOTH axes uniformly.
+    // Do NOT set height on Textbox — Fabric v5 computes it from content automatically.
     canvas.on('object:scaled', (e) => {
       const obj = e.target;
       if (!obj || obj.type !== 'textbox') return;
+      if (!(obj as any)._isSticky) return; // only sticky notes, not plain IText
 
       const textbox = obj as fabric.Textbox;
       const scaleX = textbox.scaleX ?? 1;
       const scaleY = textbox.scaleY ?? 1;
-      // Use the larger axis so the note stays roughly square
-      const scale = Math.max(scaleX, scaleY);
+      const scale  = Math.max(scaleX, scaleY); // uniform scale from dominant axis
 
-      const baseFontSize = textbox.fontSize ?? 16;
-      const newFontSize = Math.max(10, Math.round(baseFontSize * scale));
-      const newWidth   = Math.round((textbox.width  ?? 200) * scaleX);
-      const newHeight  = Math.round((textbox.height ?? 200) * scaleY);
+      if (Math.abs(scale - 1) < 0.005) return; // no meaningful change
 
-      textbox.set({
-        fontSize: newFontSize,
-        width:    newWidth,
-        height:   newHeight,
-        scaleX:   1,
-        scaleY:   1,
-      });
+      // Read from stored bases so repeated resizes are never multiplicative
+      const baseFontSize = (textbox as any)._stickyBaseFontSize as number ?? 16;
+      const baseWidth    = (textbox as any)._stickyBaseWidth    as number ?? 200;
+
+      // Accumulate the scale factor relative to the bases
+      const accumulatedScale = (textbox as any)._stickyScale as number ?? 1;
+      const newAccumulatedScale = accumulatedScale * scale;
+
+      const newFontSize = Math.max(10, Math.round(baseFontSize * newAccumulatedScale));
+      const newWidth    = Math.max(80,  Math.round(baseWidth    * newAccumulatedScale));
+
+      (textbox as any)._stickyScale = newAccumulatedScale;
+
+      textbox.set({ fontSize: newFontSize, width: newWidth, scaleX: 1, scaleY: 1 });
       textbox.setCoords();
       canvas.requestRenderAll();
-
-      // Push the resized note dimensions to Yjs so collaborators see the change
       canvas.fire('object:modified', { target: textbox });
     });
 
@@ -277,17 +283,18 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
         setActiveTool('select');
         isDrawingRef.current = false;
       } else if (currentTool === 'sticky') {
+        const STICKY_BASE_FONT = 16;
+        const STICKY_BASE_WIDTH = 220;
         const sticky = new fabric.Textbox('Write note...', {
           left: pointer.x,
           top: pointer.y,
-          width: 200,
-          height: 200,
-          fontSize: 16,
+          width: STICKY_BASE_WIDTH,
+          fontSize: STICKY_BASE_FONT,
           fontFamily: 'Inter, sans-serif',
           fill: '#1e293b',
           backgroundColor: '#fef08a',
           padding: 20,
-          splitByGrapheme: true,
+          splitByGrapheme: false, // let Fabric wrap naturally by word
           lockScalingFlip: true,
           shadow: new fabric.Shadow({
             color: 'rgba(0,0,0,0.1)',
@@ -297,7 +304,13 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           }),
           id: crypto.randomUUID(),
           creatorId: currentUserId,
-        });
+        } as any);
+
+        // Stamp base values used by object:scaled to prevent compounding
+        (sticky as any)._isSticky           = true;
+        (sticky as any)._stickyBaseFontSize = STICKY_BASE_FONT;
+        (sticky as any)._stickyBaseWidth    = STICKY_BASE_WIDTH;
+        (sticky as any)._stickyScale        = 1;
 
         canvas.add(sticky);
         canvas.setActiveObject(sticky);
@@ -463,6 +476,13 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
           const existing = canvas.getObjects().find((o) => o.id === key);
           if (existing) {
             existing.set(val);
+            // Re-stamp custom sticky properties so object:scaled handler works on remote objects
+            if (val._isSticky) {
+              (existing as any)._isSticky = true;
+              (existing as any)._stickyBaseFontSize = val._stickyBaseFontSize ?? 16;
+              (existing as any)._stickyBaseWidth    = val._stickyBaseWidth    ?? 220;
+              (existing as any)._stickyScale        = val._stickyScale        ?? 1;
+            }
             existing.setCoords();
             canvas.renderAll();
           } else {
@@ -470,7 +490,13 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
               const newObj = enlivened[0];
               newObj.id = key;
               newObj.creatorId = val.creatorId;
-
+              // Re-stamp on freshly enlivened object
+              if (val._isSticky) {
+                (newObj as any)._isSticky = true;
+                (newObj as any)._stickyBaseFontSize = val._stickyBaseFontSize ?? 16;
+                (newObj as any)._stickyBaseWidth    = val._stickyBaseWidth    ?? 220;
+                (newObj as any)._stickyScale        = val._stickyScale        ?? 1;
+              }
               const dup = canvas.getObjects().find((o) => o.id === key);
               if (!dup) {
                 canvas.add(newObj);
