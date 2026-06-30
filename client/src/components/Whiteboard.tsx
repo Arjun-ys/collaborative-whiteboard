@@ -169,11 +169,10 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       }
     });
 
-    // Bake sticky note scale AFTER the drag ends.
-    // Key fix: always derive new values from _stickyBase* (set at creation and updated after
-    // each bake) so multiple sequential resizes never compound into runaway font growth.
-    // Use Math.max(scaleX, scaleY) so corner drags expand BOTH axes uniformly.
-    // Do NOT set height on Textbox — Fabric v5 computes it from content automatically.
+    // Bake sticky note scale AFTER the drag ends (object:scaling mid-drag resets break the handle).
+    // Font size is intentionally NOT changed — only the container width grows so text reflows
+    // naturally within the new area. Math.max(scaleX, scaleY) makes corner drags feel symmetric.
+    // Height is left to Fabric's auto-layout (Textbox ignores explicit height).
     canvas.on('object:scaled', (e) => {
       const obj = e.target;
       if (!obj || obj.type !== 'textbox') return;
@@ -182,24 +181,20 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
       const textbox = obj as fabric.Textbox;
       const scaleX = textbox.scaleX ?? 1;
       const scaleY = textbox.scaleY ?? 1;
-      const scale  = Math.max(scaleX, scaleY); // uniform scale from dominant axis
+      // Use dominant axis so corner drags resize in both directions meaningfully
+      const scale  = Math.max(scaleX, scaleY);
 
       if (Math.abs(scale - 1) < 0.005) return; // no meaningful change
 
-      // Read from stored bases so repeated resizes are never multiplicative
-      const baseFontSize = (textbox as any)._stickyBaseFontSize as number ?? 16;
-      const baseWidth    = (textbox as any)._stickyBaseWidth    as number ?? 200;
+      // Grow the container width; leave fontSize untouched so text just reflows
+      const currentWidth = textbox.width ?? 220;
+      const newWidth = Math.max(80, Math.round(currentWidth * scale));
 
-      // Accumulate the scale factor relative to the bases
-      const accumulatedScale = (textbox as any)._stickyScale as number ?? 1;
-      const newAccumulatedScale = accumulatedScale * scale;
+      // Track accumulated scale for Yjs sync accuracy
+      const accumulated = (textbox as any)._stickyScale ?? 1;
+      (textbox as any)._stickyScale = accumulated * scale;
 
-      const newFontSize = Math.max(10, Math.round(baseFontSize * newAccumulatedScale));
-      const newWidth    = Math.max(80,  Math.round(baseWidth    * newAccumulatedScale));
-
-      (textbox as any)._stickyScale = newAccumulatedScale;
-
-      textbox.set({ fontSize: newFontSize, width: newWidth, scaleX: 1, scaleY: 1 });
+      textbox.set({ width: newWidth, scaleX: 1, scaleY: 1 });
       textbox.setCoords();
       canvas.requestRenderAll();
       canvas.fire('object:modified', { target: textbox });
