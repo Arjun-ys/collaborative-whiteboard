@@ -1,4 +1,7 @@
 import { create } from 'zustand';
+import { swapThemeColor } from '../utils/themeColors';
+import { createId } from '../utils/id';
+import type { ConnectionState } from '../types/collaboration';
 
 export type ToolType = 'select' | 'brush' | 'rectangle' | 'circle' | 'text' | 'sticky';
 
@@ -9,12 +12,14 @@ interface WhiteboardState {
   strokeWidth: number;
   fontSize: number;
   roomId: string;
-  connected: boolean;
+  connectionState: ConnectionState;
   userId: string;
   userName: string;
   activeUsers: number;
   theme: 'light' | 'dark';
   isStickySelected: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
   
   setActiveTool: (tool: ToolType) => void;
   setStrokeColor: (color: string) => void;
@@ -22,12 +27,13 @@ interface WhiteboardState {
   setStrokeWidth: (width: number) => void;
   setFontSize: (size: number) => void;
   setRoomId: (id: string) => void;
-  setConnected: (status: boolean) => void;
+  setConnectionState: (status: ConnectionState) => void;
   setUserId: (id: string) => void;
   setUserName: (name: string) => void;
   setActiveUsers: (count: number) => void;
   toggleTheme: () => void;
   setIsStickySelected: (val: boolean) => void;
+  setHistoryState: (state: { canUndo: boolean; canRedo: boolean }) => void;
 }
 
 // Generate a random username if not set
@@ -57,12 +63,14 @@ export const useStore = create<WhiteboardState>((set) => ({
   strokeWidth: 4,
   fontSize: 24,
   roomId: getInitialRoomId(),
-  connected: false,
-  userId: crypto.randomUUID(),
+  connectionState: 'connecting',
+  userId: createId(),
   userName: getRandomName(),
   activeUsers: 1,
   theme: 'dark', // default theme is dark
   isStickySelected: false,
+  canUndo: false,
+  canRedo: false,
 
   setActiveTool: (tool) => set({ activeTool: tool }),
   setStrokeColor: (color) => set({ strokeColor: color }),
@@ -70,29 +78,19 @@ export const useStore = create<WhiteboardState>((set) => ({
   setStrokeWidth: (width) => set({ strokeWidth: width }),
   setFontSize: (size) => set({ fontSize: size }),
   setRoomId: (id) => set({ roomId: id }),
-  setConnected: (status) => set({ connected: status }),
+  setConnectionState: (connectionState) => set({ connectionState }),
   setUserId: (id) => set({ userId: id }),
   setUserName: (name) => set({ userName: name }),
   setActiveUsers: (count) => set({ activeUsers: count }),
   setIsStickySelected: (val) => set({ isStickySelected: val }),
+  setHistoryState: (historyState) => set(historyState),
   
+  // Swap pairs are imported from utils/themeColors (single source of truth — AGENTS.md Rule #4)
   toggleTheme: () => set((state) => {
     const nextTheme = state.theme === 'light' ? 'dark' : 'light';
 
-    // Pairs of [darkModeColor, lightModeColor] to swap when toggling
-    const swapPairs: [string, string][] = [
-      ['#ffffff', '#000000'],   // pure white ↔ pure black
-      ['#f3f4f6', '#1e293b'],   // light gray ↔ dark slate (primary ink pair)
-      ['#f8fafc', '#0f172a'],   // near-white ↔ near-black
-      ['#e2e8f0', '#334155'],   // cool gray ↔ slate-700
-    ];
-
     const swap = (color: string): string => {
-      for (const [dark, light] of swapPairs) {
-        if (nextTheme === 'light' && color === dark) return light;
-        if (nextTheme === 'dark'  && color === light) return dark;
-      }
-      return color; // any other color (purple, red, etc.) is left unchanged
+      return swapThemeColor(color, nextTheme) ?? color;
     };
 
     return {

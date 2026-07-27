@@ -1,26 +1,62 @@
 import React, { useEffect, useRef } from 'react';
 import { fabric } from 'fabric';
 import { useStore } from '../store/useStore';
+import { CUSTOM_FABRIC_PROPS } from '../utils/fabricHelpers';
+import { swapThemeColor } from '../utils/themeColors';
+import { createId } from '../utils/id';
+import { logger } from '../utils/logger';
+import { confirmDialog, toast } from './Toast';
+import type { CollaborationController } from '../types/collaboration';
+import type { CanvasControllerRegistration, SerializedCanvasObject } from '../types/whiteboard';
+
+type HistoryEntry =
+  | { kind: 'object'; objectId: string; before?: SerializedCanvasObject; after?: SerializedCanvasObject }
+  | { kind: 'clear'; objects: SerializedCanvasObject[] };
 
 interface WhiteboardProps {
-  setClearCanvasFn: (fn: () => void) => void;
-  canvasObjectsMap?: any; // Y.Map<any>
+  canvasObjectsMap?: any;
+  collaboration?: CollaborationController;
   onLocalObjectAdded?: (obj: fabric.Object) => void;
   onLocalObjectModified?: (obj: fabric.Object) => void;
   onLocalObjectRemoved?: (obj: fabric.Object) => void;
   registerCanvasRef?: (canvas: fabric.Canvas | null) => void;
+  registerCanvasController?: CanvasControllerRegistration;
 }
 
+const MAX_HISTORY_ENTRIES = 100;
+const DEFAULT_TEXT = 'Double-click to edit';
+const DEFAULT_STICKY_TEXT = 'Write note...';
+
+const cloneSerialized = (value: SerializedCanvasObject): SerializedCanvasObject =>
+  JSON.parse(JSON.stringify(value)) as SerializedCanvasObject;
+
+const stableStringify = (value: unknown): string => {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+};
+
+const snapshotsMatch = (left?: SerializedCanvasObject, right?: SerializedCanvasObject) =>
+  stableStringify(left ?? null) === stableStringify(right ?? null);
+
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 export const Whiteboard: React.FC<WhiteboardProps> = ({
-  setClearCanvasFn,
   canvasObjectsMap,
+  collaboration,
   onLocalObjectAdded,
   onLocalObjectModified,
   onLocalObjectRemoved,
   registerCanvasRef,
+  registerCanvasController,
 }) => {
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
+  const collaborationRef = useRef(collaboration);
+  const reconcileLocksRef = useRef<(() => void) | null>(null);
 
   const {
     activeTool,
@@ -30,635 +66,695 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
     strokeWidth,
     fontSize,
     userId,
+    roomId,
     theme,
     setIsStickySelected,
+    setHistoryState,
   } = useStore();
 
-  // Internal states for shape creation
-  const isDrawingRef = useRef(false);
+  const stateRef = useRef({ activeTool, strokeColor, fillColor, strokeWidth, fontSize, userId, roomId, theme });
+  const isUpdatingFromYjsRef = useRef(false);
+  const historyReplayRef = useRef(false);
+  const historySuspendedRef = useRef(false);
+  const objectIndexRef = useRef<Map<string, fabric.Object>>(new Map());
+  const lastKnownObjectsRef = useRef<Map<string, SerializedCanvasObject>>(new Map());
+  const historyPastRef = useRef<HistoryEntry[]>([]);
+  const historyFutureRef = useRef<HistoryEntry[]>([]);
+  const pendingCreationIdsRef = useRef<Set<string>>(new Set());
+  const editingBeforeRef = useRef<Map<string, SerializedCanvasObject>>(new Map());
+  const activeInteractionIdsRef = useRef<Set<string>>(new Set());
+  const pendingRemoteRef = useRef<Map<string, SerializedCanvasObject | null>>(new Map());
+  const isCreatingShapeRef = useRef(false);
   const startPointerRef = useRef<{ x: number; y: number } | null>(null);
   const activeShapeRef = useRef<fabric.Object | null>(null);
 
-  // Echo cancellation lock
-  const isUpdatingFromYjsRef = useRef(false);
-
-  // References to keep event handlers current without re-binding Fabric events
-  const stateRef = useRef({
-    activeTool,
-    strokeColor,
-    fillColor,
-    strokeWidth,
-    fontSize,
-    userId,
-    theme,
-  });
+  useEffect(() => {
+    collaborationRef.current = collaboration;
+  }, [collaboration]);
 
   useEffect(() => {
-    stateRef.current = {
-      activeTool,
-      strokeColor,
-      fillColor,
-      strokeWidth,
-      fontSize,
-      userId,
-      theme,
-    };
-  }, [activeTool, strokeColor, fillColor, strokeWidth, fontSize, userId, theme]);
+    stateRef.current = { activeTool, strokeColor, fillColor, strokeWidth, fontSize, userId, roomId, theme };
+  }, [activeTool, strokeColor, fillColor, strokeWidth, fontSize, userId, roomId, theme]);
 
-  // Initial Setup & Canvas Lifecycle
   useEffect(() => {
     if (!canvasRef.current) return;
 
-    // Create Fabric Canvas
+    const initialWidth = wrapperRef.current?.clientWidth || window.innerWidth;
+    const initialHeight = wrapperRef.current?.clientHeight || window.innerHeight;
     const canvas = new fabric.Canvas(canvasRef.current, {
-      width: window.innerWidth,
-      height: window.innerHeight,
-      backgroundColor: theme === 'light' ? '#ffffff' : '#000000',
+      width: initialWidth,
+      height: initialHeight,
+      backgroundColor: stateRef.current.theme === 'light' ? '#ffffff' : '#000000',
       selection: true,
       preserveObjectStacking: true,
     });
-
     fabricCanvasRef.current = canvas;
-    if (registerCanvasRef) {
-      registerCanvasRef(canvas);
-    }
+    registerCanvasRef?.(canvas);
 
-    // Set clear function in parent
-    setClearCanvasFn(() => {
-      if (window.confirm('Are you sure you want to clear the canvas?')) {
-        if (canvasObjectsMap) {
-          canvasObjectsMap.doc.transact(() => {
-            canvasObjectsMap.forEach((_: any, key: string) => {
-              canvasObjectsMap.delete(key);
-            });
-          });
-        } else {
-          canvas.clear();
-          const bg = stateRef.current.theme === 'light' ? '#ffffff' : '#000000';
-          canvas.setBackgroundColor(bg, canvas.renderAll.bind(canvas));
-        }
-      }
-    });
-
-    // Handle Window Resize
-    const handleResize = () => {
-      canvas.setWidth(window.innerWidth);
-      canvas.setHeight(window.innerHeight);
-      canvas.renderAll();
+    const serialize = (object: fabric.Object) => object.toObject([...CUSTOM_FABRIC_PROPS]) as SerializedCanvasObject;
+    const remember = (object: fabric.Object) => {
+      if (object.id) lastKnownObjectsRef.current.set(object.id, cloneSerialized(serialize(object)));
     };
-    window.addEventListener('resize', handleResize);
-
-    // Event listeners with Yjs syncing & state lock guards
-    canvas.on('object:added', (e) => {
-      if (isUpdatingFromYjsRef.current) return;
-      const obj = e.target;
-      if (!obj) return;
-
-      // Inject metadata
-      if (!obj.id) {
-        obj.id = crypto.randomUUID();
-      }
-      if (!obj.creatorId) {
-        obj.creatorId = stateRef.current.userId;
-      }
-
-      console.log(`[Canvas] Object added locally: ${obj.type} (ID: ${obj.id})`);
-      if (canvasObjectsMap) {
-        canvasObjectsMap.set(obj.id, obj.toObject(['id', 'creatorId', 'backgroundColor', 'padding', 'shadow', '_isSticky', '_stickyBaseFontSize', '_stickyBaseWidth', '_stickyScale']));
-      }
-      if (onLocalObjectAdded) {
-        onLocalObjectAdded(obj);
-      }
-    });
-
-    canvas.on('object:modified', (e) => {
-      if (isUpdatingFromYjsRef.current) return;
-      const obj = e.target;
-      if (!obj) return;
-      console.log(`[Canvas] Object modified locally: ${obj.type} (ID: ${obj.id})`);
-      if (canvasObjectsMap) {
-        canvasObjectsMap.set(obj.id, obj.toObject(['id', 'creatorId', 'backgroundColor', 'padding', 'shadow', '_isSticky', '_stickyBaseFontSize', '_stickyBaseWidth', '_stickyScale']));
-      }
-      if (onLocalObjectModified) {
-        onLocalObjectModified(obj);
-      }
-    });
-
-    canvas.on('object:removed', (e) => {
-      if (isUpdatingFromYjsRef.current) return;
-      const obj = e.target;
-      if (!obj) return;
-      console.log(`[Canvas] Object removed locally: ${obj.type} (ID: ${obj.id})`);
-      if (canvasObjectsMap) {
-        canvasObjectsMap.delete(obj.id);
-      }
-      if (onLocalObjectRemoved) {
-        onLocalObjectRemoved(obj);
-      }
-    });
-
-    // Path creation stamps
-    canvas.on('path:created', (e: any) => {
-      const path = e.path;
-      if (!path) return;
-      if (!path.id) {
-        path.id = crypto.randomUUID();
-      }
-      if (!path.creatorId) {
-        path.creatorId = stateRef.current.userId;
-      }
-    });
-
-    // Bake sticky note scale AFTER the drag ends (object:scaling mid-drag resets break the handle).
-    // Font size is intentionally NOT changed — only the container width grows so text reflows
-    // naturally within the new area. Math.max(scaleX, scaleY) makes corner drags feel symmetric.
-    // Height is left to Fabric's auto-layout (Textbox ignores explicit height).
-    canvas.on('object:scaled', (e) => {
-      const obj = e.target;
-      if (!obj || obj.type !== 'textbox') return;
-      if (!(obj as any)._isSticky) return; // only sticky notes, not plain IText
-
-      const textbox = obj as fabric.Textbox;
-      const scaleX = textbox.scaleX ?? 1;
-      const scaleY = textbox.scaleY ?? 1;
-      // Use dominant axis so corner drags resize in both directions meaningfully
-      const scale  = Math.max(scaleX, scaleY);
-
-      if (Math.abs(scale - 1) < 0.005) return; // no meaningful change
-
-      // Grow the container width; leave fontSize untouched so text just reflows
-      const currentWidth = textbox.width ?? 220;
-      const newWidth = Math.max(80, Math.round(currentWidth * scale));
-
-      // Track accumulated scale for Yjs sync accuracy
-      const accumulated = (textbox as any)._stickyScale ?? 1;
-      (textbox as any)._stickyScale = accumulated * scale;
-
-      textbox.set({ width: newWidth, scaleX: 1, scaleY: 1 });
-      textbox.setCoords();
-      canvas.requestRenderAll();
-      canvas.fire('object:modified', { target: textbox });
-    });
-
-    // Track selections to show/hide PropertiesPanel fill options dynamically
-    const updateSelectionState = () => {
-      const activeObj = canvas.getActiveObject();
-      setIsStickySelected(!!(activeObj && activeObj.type === 'textbox'));
+    const rememberSerialized = (id: string, value: SerializedCanvasObject) => {
+      lastKnownObjectsRef.current.set(id, cloneSerialized(value));
     };
-    canvas.on('selection:created', updateSelectionState);
-    canvas.on('selection:updated', updateSelectionState);
-    canvas.on('selection:cleared', () => setIsStickySelected(false));
-
-    // Mouse events for shape creation
-    canvas.on('mouse:down', (options) => {
-      const { activeTool: currentTool, strokeColor: currentStroke, fillColor: currentFill, strokeWidth: currentWidth, fontSize: currentFontSize, userId: currentUserId } = stateRef.current;
-
-      if (currentTool === 'select') return;
-
-      const pointer = canvas.getPointer(options.e);
-      startPointerRef.current = pointer;
-
-      if (currentTool === 'brush') return;
-
-      isDrawingRef.current = true;
-
-      if (currentTool === 'rectangle') {
-        const rect = new fabric.Rect({
-          left: pointer.x,
-          top: pointer.y,
-          width: 0,
-          height: 0,
-          stroke: currentStroke,
-          fill: currentFill,
-          strokeWidth: currentWidth,
-          selectable: false,
-          hasControls: false,
-          id: crypto.randomUUID(),
-          creatorId: currentUserId,
-        });
-        activeShapeRef.current = rect;
-        canvas.add(rect);
-        canvas.setActiveObject(rect);
-      } else if (currentTool === 'circle') {
-        const circle = new fabric.Circle({
-          left: pointer.x,
-          top: pointer.y,
-          radius: 0,
-          stroke: currentStroke,
-          fill: currentFill,
-          strokeWidth: currentWidth,
-          selectable: false,
-          hasControls: false,
-          id: crypto.randomUUID(),
-          creatorId: currentUserId,
-        });
-        activeShapeRef.current = circle;
-        canvas.add(circle);
-        canvas.setActiveObject(circle);
-      } else if (currentTool === 'text') {
-        const text = new fabric.IText('Double-click to edit', {
-          left: pointer.x,
-          top: pointer.y,
-          fill: currentStroke,
-          fontSize: currentFontSize,
-          fontFamily: 'Inter, sans-serif',
-          id: crypto.randomUUID(),
-          creatorId: currentUserId,
-        });
-        canvas.add(text);
-        canvas.setActiveObject(text);
-        canvas.renderAll();
-        
-        setTimeout(() => {
-          text.enterEditing();
-          text.selectAll();
-          canvas.renderAll();
-        }, 50);
-
-        setActiveTool('select');
-        isDrawingRef.current = false;
-      } else if (currentTool === 'sticky') {
-        const STICKY_BASE_FONT = 16;
-        const STICKY_BASE_WIDTH = 220;
-        const sticky = new fabric.Textbox('Write note...', {
-          left: pointer.x,
-          top: pointer.y,
-          width: STICKY_BASE_WIDTH,
-          fontSize: STICKY_BASE_FONT,
-          fontFamily: 'Inter, sans-serif',
-          fill: '#1e293b',
-          backgroundColor: '#fef08a',
-          padding: 20,
-          splitByGrapheme: false, // let Fabric wrap naturally by word
-          lockScalingFlip: true,
-          shadow: new fabric.Shadow({
-            color: 'rgba(0,0,0,0.1)',
-            blur: 10,
-            offsetX: 4,
-            offsetY: 4,
-          }),
-          id: crypto.randomUUID(),
-          creatorId: currentUserId,
-        } as any);
-
-        // Stamp base values used by object:scaled to prevent compounding
-        (sticky as any)._isSticky           = true;
-        (sticky as any)._stickyBaseFontSize = STICKY_BASE_FONT;
-        (sticky as any)._stickyBaseWidth    = STICKY_BASE_WIDTH;
-        (sticky as any)._stickyScale        = 1;
-
-        canvas.add(sticky);
-        canvas.setActiveObject(sticky);
-        canvas.renderAll();
-
-        setTimeout(() => {
-          sticky.enterEditing();
-          sticky.selectAll();
-          canvas.renderAll();
-        }, 50);
-
-        setActiveTool('select');
-        isDrawingRef.current = false;
+    const findById = (id: string) => objectIndexRef.current.get(id);
+    const withRemoteUpdate = (callback: () => void) => {
+      const wasUpdating = isUpdatingFromYjsRef.current;
+      isUpdatingFromYjsRef.current = true;
+      try {
+        callback();
+      } finally {
+        isUpdatingFromYjsRef.current = wasUpdating;
       }
-    });
-
-    canvas.on('mouse:move', (options) => {
-      if (!isDrawingRef.current || !startPointerRef.current || !activeShapeRef.current) return;
-
-      const pointer = canvas.getPointer(options.e);
-      const startPointer = startPointerRef.current;
-      const activeShape = activeShapeRef.current;
-      const { activeTool: currentTool } = stateRef.current;
-
-      if (currentTool === 'rectangle') {
-        const rect = activeShape as fabric.Rect;
-        const left = Math.min(startPointer.x, pointer.x);
-        const top = Math.min(startPointer.y, pointer.y);
-        const width = Math.abs(startPointer.x - pointer.x);
-        const height = Math.abs(startPointer.y - pointer.y);
-
-        rect.set({ left, top, width, height });
-      } else if (currentTool === 'circle') {
-        const circle = activeShape as fabric.Circle;
-        const width = Math.abs(startPointer.x - pointer.x);
-        const height = Math.abs(startPointer.y - pointer.y);
-        const radius = Math.max(width, height) / 2;
-
-        const left = startPointer.x + (pointer.x > startPointer.x ? 0 : -radius * 2);
-        const top = startPointer.y + (pointer.y > startPointer.y ? 0 : -radius * 2);
-
-        circle.set({ left, top, radius });
+    };
+    const syncHistoryState = () => {
+      setHistoryState({ canUndo: historyPastRef.current.length > 0, canRedo: historyFutureRef.current.length > 0 });
+    };
+    const recordHistory = (entry: HistoryEntry) => {
+      if (historySuspendedRef.current || historyReplayRef.current) return;
+      historyPastRef.current.push(entry);
+      if (historyPastRef.current.length > MAX_HISTORY_ENTRIES) historyPastRef.current.shift();
+      historyFutureRef.current = [];
+      syncHistoryState();
+    };
+    const updateStickyMetadata = (object: fabric.Object, value: SerializedCanvasObject) => {
+      if (!value._isSticky) return;
+      (object as any)._isSticky = true;
+      (object as any)._stickyBaseFontSize = value._stickyBaseFontSize ?? 16;
+      (object as any)._stickyBaseWidth = value._stickyBaseWidth ?? 220;
+      (object as any)._stickyScale = value._stickyScale ?? 1;
+    };
+    const isLockedByCollaborator = (objectId?: string) => {
+      if (!objectId) return false;
+      const lease = collaborationRef.current?.locks[objectId];
+      return !!lease && !collaborationRef.current?.isLockOwnedByCurrentUser(objectId);
+    };
+    const applyInteractivity = () => {
+      const canSelect = stateRef.current.activeTool === 'select';
+      canvas.forEachObject((object) => {
+        const locked = isLockedByCollaborator(object.id);
+        object.selectable = canSelect && !locked;
+        object.evented = !locked;
+        object.hoverCursor = locked ? 'not-allowed' : canSelect ? 'move' : 'crosshair';
+      });
+      const active = canvas.getActiveObject();
+      if (active?.id && isLockedByCollaborator(active.id)) {
+        finishInteraction(active.id);
+        canvas.discardActiveObject();
       }
-
-      activeShape.setCoords();
       canvas.requestRenderAll();
-    });
+    };
 
-    canvas.on('mouse:up', () => {
-      if (!isDrawingRef.current) return;
-      isDrawingRef.current = false;
-
-      const activeShape = activeShapeRef.current;
-      if (activeShape) {
-        const isTooSmall = 
-          (activeShape.type === 'rect' && ((activeShape.width || 0) < 5 || (activeShape.height || 0) < 5)) ||
-          (activeShape.type === 'circle' && (activeShape as fabric.Circle).radius! < 3);
-
-        if (isTooSmall) {
-          canvas.remove(activeShape);
-        } else {
-          activeShape.set({
-            selectable: true,
-            hasControls: true,
-          });
-          activeShape.setCoords();
-          // Fire added event to sync with Yjs
-          canvas.fire('object:added', { target: activeShape });
-        }
+    const commitNewObject = (object: fabric.Object) => {
+      if (!object.id) object.id = createId();
+      if (!object.creatorId) object.creatorId = stateRef.current.userId;
+      objectIndexRef.current.set(object.id, object);
+      const snapshot = cloneSerialized(serialize(object));
+      recordHistory({ kind: 'object', objectId: object.id, after: snapshot });
+      rememberSerialized(object.id, snapshot);
+      if (canvasObjectsMap) canvasObjectsMap.set(object.id, snapshot);
+      onLocalObjectAdded?.(object);
+    };
+    const persistModifiedObject = (object: fabric.Object) => {
+      if (!object.id) return;
+      if (isLockedByCollaborator(object.id)) {
+        const latest = canvasObjectsMap?.get(object.id);
+        if (latest) applyRemoteObject(object.id, latest);
+        toast.warning('This object is being edited by a collaborator');
+        return;
       }
+      const before = lastKnownObjectsRef.current.get(object.id);
+      const after = cloneSerialized(serialize(object));
+      if (before && !snapshotsMatch(before, after)) {
+        recordHistory({ kind: 'object', objectId: object.id, before: cloneSerialized(before), after });
+      }
+      rememberSerialized(object.id, after);
+      if (canvasObjectsMap) canvasObjectsMap.set(object.id, after);
+      onLocalObjectModified?.(object);
+    };
+    const removeObject = (object: fabric.Object) => {
+      if (!object.id) return;
+      const before = lastKnownObjectsRef.current.get(object.id);
+      if (before) recordHistory({ kind: 'object', objectId: object.id, before: cloneSerialized(before) });
+      objectIndexRef.current.delete(object.id);
+      lastKnownObjectsRef.current.delete(object.id);
+      if (canvasObjectsMap) canvasObjectsMap.delete(object.id);
+      onLocalObjectRemoved?.(object);
+    };
 
-      activeShapeRef.current = null;
-      startPointerRef.current = null;
-      canvas.requestRenderAll();
-    });
-
-    // Delete keys
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        const activeObj = canvas.getActiveObject();
-        if (activeObj && (activeObj as any).isEditing) {
+    const enlivenObject = (value: SerializedCanvasObject, onReady: (object: fabric.Object | null) => void) => {
+      fabric.util.enlivenObjects([value], (objects: fabric.Object[]) => onReady(objects[0] ?? null), 'fabric');
+    };
+    const applyRemoteObject = (objectId: string, value: SerializedCanvasObject) => {
+      if (activeInteractionIdsRef.current.has(objectId)) {
+        if (collaborationRef.current?.isLockOwnedByCurrentUser(objectId)) return;
+        pendingRemoteRef.current.set(objectId, cloneSerialized(value));
+        return;
+      }
+      const existing = findById(objectId);
+      if (existing) {
+        withRemoteUpdate(() => {
+          existing.set(value);
+          updateStickyMetadata(existing, value);
+          existing.setCoords();
+          rememberSerialized(objectId, value);
+        });
+        applyInteractivity();
+        return;
+      }
+      enlivenObject(value, (newObject) => {
+        if (!newObject) return;
+        const latest = canvasObjectsMap?.get(objectId) as SerializedCanvasObject | undefined;
+        if (!latest || !snapshotsMatch(latest, value)) {
+          if (latest) applyRemoteObject(objectId, latest);
           return;
         }
+        withRemoteUpdate(() => {
+          const duplicate = findById(objectId);
+          if (duplicate) {
+            duplicate.set(value);
+            updateStickyMetadata(duplicate, value);
+            duplicate.setCoords();
+          } else {
+            newObject.id = objectId;
+            newObject.creatorId = value.creatorId;
+            updateStickyMetadata(newObject, value);
+            objectIndexRef.current.set(objectId, newObject);
+            canvas.add(newObject);
+          }
+          rememberSerialized(objectId, value);
+        });
+        applyInteractivity();
+      });
+    };
+    const applyRemoteDelete = (objectId: string) => {
+      if (activeInteractionIdsRef.current.has(objectId)) {
+        if (collaborationRef.current?.isLockOwnedByCurrentUser(objectId)) return;
+        pendingRemoteRef.current.set(objectId, null);
+        return;
+      }
+      const existing = findById(objectId);
+      if (!existing) return;
+      withRemoteUpdate(() => {
+        objectIndexRef.current.delete(objectId);
+        lastKnownObjectsRef.current.delete(objectId);
+        canvas.remove(existing);
+      });
+      canvas.requestRenderAll();
+    };
+    const finishInteraction = (objectId?: string) => {
+      if (!objectId) return;
+      activeInteractionIdsRef.current.delete(objectId);
+      collaborationRef.current?.releaseLock(objectId);
+      const pending = pendingRemoteRef.current.get(objectId);
+      pendingRemoteRef.current.delete(objectId);
+      if (pending === null) applyRemoteDelete(objectId);
+      else if (pending) applyRemoteObject(objectId, pending);
+    };
+    const beginInteraction = (object: fabric.Object, announceFailure = true) => {
+      if (!object.id) return false;
+      if (isLockedByCollaborator(object.id) || !collaborationRef.current?.claimLock(object.id)) {
+        if (announceFailure) toast.info('Locked while a collaborator is editing this object');
+        canvas.discardActiveObject();
+        canvas.requestRenderAll();
+        return false;
+      }
+      activeInteractionIdsRef.current.add(object.id);
+      collaborationRef.current.refreshLock(object.id);
+      return true;
+    };
 
-        const activeObjects = canvas.getActiveObjects();
-        if (activeObjects && activeObjects.length > 0) {
-          activeObjects.forEach((obj) => canvas.remove(obj));
-          canvas.discardActiveObject();
-          canvas.requestRenderAll();
+    const updateCanvasSize = () => {
+      const width = wrapperRef.current?.clientWidth || window.innerWidth;
+      const height = wrapperRef.current?.clientHeight || window.innerHeight;
+      canvas.setDimensions({ width, height });
+      canvas.requestRenderAll();
+    };
+    const wrapper = wrapperRef.current;
+    const resizeObserver = wrapper ? new ResizeObserver(updateCanvasSize) : null;
+    if (wrapper) resizeObserver?.observe(wrapper);
+    window.addEventListener('resize', updateCanvasSize);
+
+    const clearCanvas = async () => {
+      const confirmed = await confirmDialog('Are you sure you want to clear the entire canvas?');
+      if (!confirmed) return;
+      const objects = canvas.getObjects().map((object) => cloneSerialized(serialize(object)));
+      historySuspendedRef.current = true;
+      withRemoteUpdate(() => {
+        if (canvasObjectsMap) {
+          canvasObjectsMap.doc.transact(() => canvasObjectsMap.forEach((_: unknown, key: string) => canvasObjectsMap.delete(key)));
         }
+        canvas.clear();
+        canvas.setBackgroundColor(stateRef.current.theme === 'light' ? '#ffffff' : '#000000', canvas.renderAll.bind(canvas));
+        objectIndexRef.current.clear();
+        lastKnownObjectsRef.current.clear();
+      });
+      historySuspendedRef.current = false;
+      if (objects.length) recordHistory({ kind: 'clear', objects });
+    };
+
+    const exportPng = async () => {
+      const dataUrl = canvas.toDataURL({ format: 'png', multiplier: 2 });
+      const fileName = `whiteboard-${stateRef.current.roomId}.png`;
+      try {
+        const blob = await (await fetch(dataUrl)).blob();
+        const file = new File([blob], fileName, { type: 'image/png' });
+        if (isIOS() && navigator.share && navigator.canShare?.({ files: [file] })) {
+          await navigator.share({ files: [file], title: 'Whiteboard export' });
+          toast.success('PNG ready to share');
+          return;
+        }
+      } catch (error) {
+        if ((error as Error).name === 'AbortError') return;
+        logger.warn('[Export] Native share unavailable', error);
+      }
+      if (isIOS()) {
+        const preview = window.open(dataUrl, '_blank', 'noopener,noreferrer');
+        if (preview) toast.info('PNG opened in a new tab');
+        else toast.error('Allow pop-ups to export this PNG');
+        return;
+      }
+      const link = document.createElement('a');
+      link.href = dataUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success('PNG export downloaded');
+    };
+
+    const restoreHistoryObject = (snapshot: SerializedCanvasObject, done: () => void) => {
+      enlivenObject(snapshot, (object) => {
+        if (!object) {
+          done();
+          return;
+        }
+        object.id = snapshot.id || createId();
+        object.creatorId = snapshot.creatorId;
+        updateStickyMetadata(object, snapshot);
+        canvas.add(object);
+        done();
+      });
+    };
+    const currentMapMatches = (objectId: string, expected?: SerializedCanvasObject) => {
+      if (!canvasObjectsMap) return true;
+      return snapshotsMatch(canvasObjectsMap.get(objectId), expected);
+    };
+    const applyHistoryEntry = (entry: HistoryEntry, direction: 'undo' | 'redo') => {
+      historyReplayRef.current = true;
+      const finish = () => {
+        historyReplayRef.current = false;
+        syncHistoryState();
+      };
+      if (entry.kind === 'clear') {
+        if (direction === 'redo') {
+          entry.objects.forEach((snapshot) => {
+            if (!snapshot.id || !currentMapMatches(snapshot.id, snapshot)) return;
+            const existing = findById(snapshot.id);
+            if (existing) canvas.remove(existing);
+          });
+          finish();
+          return;
+        }
+        const restorations = entry.objects.filter((snapshot) => snapshot.id && !canvasObjectsMap?.has(snapshot.id));
+        if (!restorations.length) {
+          toast.info('Undo skipped because the board changed remotely');
+          finish();
+          return;
+        }
+        let remaining = restorations.length;
+        restorations.forEach((snapshot) => restoreHistoryObject(snapshot, () => {
+          remaining -= 1;
+          if (remaining === 0) finish();
+        }));
+        return;
+      }
+
+      const expected = direction === 'undo' ? entry.after : entry.before;
+      const target = direction === 'undo' ? entry.before : entry.after;
+      if (!currentMapMatches(entry.objectId, expected)) {
+        toast.info('History skipped because a collaborator changed this object');
+        finish();
+        return;
+      }
+      const existing = findById(entry.objectId);
+      if (!target) {
+        if (existing) canvas.remove(existing);
+        finish();
+        return;
+      }
+      if (existing) {
+        existing.set(target);
+        updateStickyMetadata(existing, target);
+        existing.setCoords();
+        canvas.fire('object:modified', { target: existing });
+        canvas.requestRenderAll();
+        finish();
+        return;
+      }
+      restoreHistoryObject(target, finish);
+    };
+    const undo = () => {
+      const entry = historyPastRef.current.pop();
+      if (!entry) return;
+      historyFutureRef.current.unshift(entry);
+      applyHistoryEntry(entry, 'undo');
+    };
+    const redo = () => {
+      const entry = historyFutureRef.current.shift();
+      if (!entry) return;
+      historyPastRef.current.push(entry);
+      applyHistoryEntry(entry, 'redo');
+    };
+    registerCanvasController?.({ undo, redo, exportPng, clear: clearCanvas });
+    syncHistoryState();
+
+    canvas.on('object:added', (event) => {
+      if (isUpdatingFromYjsRef.current) return;
+      const object = event.target;
+      if (!object) return;
+      if (!object.id) object.id = createId();
+      if (!object.creatorId) object.creatorId = stateRef.current.userId;
+      objectIndexRef.current.set(object.id, object);
+      if (pendingCreationIdsRef.current.has(object.id)) {
+        remember(object);
+        return;
+      }
+      commitNewObject(object);
+    });
+    canvas.on('object:modified', (event) => {
+      if (isUpdatingFromYjsRef.current || !event.target) return;
+      if (event.target.id && pendingCreationIdsRef.current.has(event.target.id)) return;
+      persistModifiedObject(event.target);
+      finishInteraction(event.target.id);
+    });
+    canvas.on('object:removed', (event) => {
+      if (isUpdatingFromYjsRef.current || !event.target) return;
+      const object = event.target;
+      if (object.id && pendingCreationIdsRef.current.delete(object.id)) {
+        objectIndexRef.current.delete(object.id);
+        lastKnownObjectsRef.current.delete(object.id);
+        return;
+      }
+      removeObject(object);
+      finishInteraction(object.id);
+    });
+    canvas.on('before:transform', (event: any) => {
+      const target = event.transform?.target as fabric.Object | undefined;
+      if (target && !beginInteraction(target)) event.transform.action = 'none';
+    });
+    ['object:moving', 'object:scaling', 'object:rotating'].forEach((eventName) => {
+      canvas.on(eventName, (event: any) => {
+        const target = event.target as fabric.Object | undefined;
+        if (!target?.id) return;
+        if (!activeInteractionIdsRef.current.has(target.id) && !beginInteraction(target, false)) return;
+        collaborationRef.current?.refreshLock(target.id);
+      });
+    });
+    canvas.on('text:editing:entered', (event: any) => {
+      const object = event.target as fabric.Object | undefined;
+      if (!object?.id) return;
+      if (!beginInteraction(object)) {
+        (object as any).exitEditing?.();
+        return;
+      }
+      editingBeforeRef.current.set(object.id, cloneSerialized(serialize(object)));
+    });
+    canvas.on('text:editing:exited', (event: any) => {
+      const object = event.target as fabric.Object | undefined;
+      if (!object?.id || isUpdatingFromYjsRef.current) return;
+      const isDraft = pendingCreationIdsRef.current.has(object.id);
+      const text = String((object as any).text ?? '').trim();
+      if (isDraft) {
+        if (!text || text === DEFAULT_TEXT || text === DEFAULT_STICKY_TEXT) {
+          historySuspendedRef.current = true;
+          canvas.remove(object);
+          historySuspendedRef.current = false;
+        } else {
+          pendingCreationIdsRef.current.delete(object.id);
+          commitNewObject(object);
+        }
+      } else {
+        const before = editingBeforeRef.current.get(object.id) ?? lastKnownObjectsRef.current.get(object.id);
+        const after = cloneSerialized(serialize(object));
+        if (!before || !snapshotsMatch(before, after)) persistModifiedObject(object);
+      }
+      editingBeforeRef.current.delete(object.id);
+      finishInteraction(object.id);
+    });
+    canvas.on('object:scaled', (event) => {
+      const object = event.target as fabric.Textbox | undefined;
+      if (!object || object.type !== 'textbox' || !(object as any)._isSticky) return;
+      const scale = Math.max(object.scaleX ?? 1, object.scaleY ?? 1);
+      if (Math.abs(scale - 1) < 0.005) return;
+      const newWidth = Math.max(80, Math.round((object.width ?? 220) * scale));
+      (object as any)._stickyScale = ((object as any)._stickyScale ?? 1) * scale;
+      object.set({ width: newWidth, scaleX: 1, scaleY: 1 });
+      object.setCoords();
+      canvas.fire('object:modified', { target: object });
+      canvas.requestRenderAll();
+    });
+    const updateSelection = () => {
+      const object = canvas.getActiveObject();
+      if (object?.id && isLockedByCollaborator(object.id)) {
+        canvas.discardActiveObject();
+        toast.info('Locked while a collaborator is editing this object');
+      }
+      setIsStickySelected(!!(object && object.type === 'textbox'));
+    };
+    canvas.on('selection:created', updateSelection);
+    canvas.on('selection:updated', updateSelection);
+    canvas.on('selection:cleared', () => setIsStickySelected(false));
+
+    canvas.on('mouse:down', (event) => {
+      const { activeTool: tool, strokeColor: stroke, fillColor: fill, strokeWidth: width, fontSize: size, userId: creator } = stateRef.current;
+      if (tool === 'select') {
+        const target = event.target as fabric.Object | undefined;
+        if (target) beginInteraction(target, false);
+        return;
+      }
+      const pointer = canvas.getPointer(event.e);
+      if (tool === 'brush') return;
+      if (tool === 'rectangle' || tool === 'circle') {
+        isCreatingShapeRef.current = true;
+        startPointerRef.current = pointer;
+        const shape = tool === 'rectangle'
+          ? new fabric.Rect({ left: pointer.x, top: pointer.y, width: 0, height: 0, stroke, fill, strokeWidth: width, selectable: false, hasControls: false, id: createId(), creatorId: creator })
+          : new fabric.Circle({ left: pointer.x, top: pointer.y, radius: 0, stroke, fill, strokeWidth: width, selectable: false, hasControls: false, id: createId(), creatorId: creator });
+        pendingCreationIdsRef.current.add(shape.id!);
+        activeShapeRef.current = shape;
+        canvas.add(shape);
+        canvas.setActiveObject(shape);
+        return;
+      }
+      const isSticky = tool === 'sticky';
+      const object = isSticky
+        ? new fabric.Textbox(DEFAULT_STICKY_TEXT, {
+          left: pointer.x, top: pointer.y, width: 220, fontSize: 16, fontFamily: 'Inter, sans-serif', fill: '#1e293b', backgroundColor: '#fef08a', padding: 20, splitByGrapheme: false, lockScalingFlip: true,
+          shadow: new fabric.Shadow({ color: 'rgba(0,0,0,0.1)', blur: 10, offsetX: 4, offsetY: 4 }), id: createId(), creatorId: creator,
+        } as any)
+        : new fabric.IText(DEFAULT_TEXT, { left: pointer.x, top: pointer.y, fill: stroke, fontSize: size, fontFamily: 'Inter, sans-serif', id: createId(), creatorId: creator });
+      if (isSticky) {
+        (object as any)._isSticky = true;
+        (object as any)._stickyBaseFontSize = 16;
+        (object as any)._stickyBaseWidth = 220;
+        (object as any)._stickyScale = 1;
+      }
+      pendingCreationIdsRef.current.add(object.id!);
+      canvas.add(object);
+      canvas.setActiveObject(object);
+      canvas.renderAll();
+      window.setTimeout(() => {
+        (object as any).enterEditing?.();
+        (object as any).selectAll?.();
+        canvas.requestRenderAll();
+      }, 0);
+      setActiveTool('select');
+    });
+    canvas.on('mouse:move', (event) => {
+      if (!isCreatingShapeRef.current || !startPointerRef.current || !activeShapeRef.current) return;
+      const pointer = canvas.getPointer(event.e);
+      const start = startPointerRef.current;
+      const shape = activeShapeRef.current;
+      if (shape.type === 'rect') {
+        shape.set({ left: Math.min(start.x, pointer.x), top: Math.min(start.y, pointer.y), width: Math.abs(start.x - pointer.x), height: Math.abs(start.y - pointer.y) });
+      } else if (shape.type === 'circle') {
+        const radius = Math.max(Math.abs(start.x - pointer.x), Math.abs(start.y - pointer.y)) / 2;
+        (shape as fabric.Circle).set({ left: start.x + (pointer.x > start.x ? 0 : -radius * 2), top: start.y + (pointer.y > start.y ? 0 : -radius * 2), radius });
+      }
+      shape.setCoords();
+      canvas.requestRenderAll();
+    });
+    canvas.on('mouse:up', () => {
+      if (isCreatingShapeRef.current) {
+        const shape = activeShapeRef.current;
+        if (shape) {
+          const tooSmall = (shape.type === 'rect' && ((shape.width ?? 0) < 5 || (shape.height ?? 0) < 5)) ||
+            (shape.type === 'circle' && ((shape as fabric.Circle).radius ?? 0) < 3);
+          if (tooSmall) {
+            historySuspendedRef.current = true;
+            canvas.remove(shape);
+            historySuspendedRef.current = false;
+          } else {
+            pendingCreationIdsRef.current.delete(shape.id!);
+            shape.set({ selectable: true, hasControls: true });
+            shape.setCoords();
+            commitNewObject(shape);
+          }
+        }
+        activeShapeRef.current = null;
+        startPointerRef.current = null;
+        isCreatingShapeRef.current = false;
+      }
+      const active = canvas.getActiveObject();
+      if (active?.id && !(active as any).isEditing) finishInteraction(active.id);
+      canvas.requestRenderAll();
+    });
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const tag = (event.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+      const active = canvas.getActiveObject();
+      const editing = !!(active && (active as any).isEditing);
+      if (!editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        event.shiftKey ? redo() : undo();
+        return;
+      }
+      if (!editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redo();
+        return;
+      }
+      if (!editing && (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'e') {
+        event.preventDefault();
+        void exportPng();
+        return;
+      }
+      if (!editing && event.key === 'Escape') {
+        if (active?.id) finishInteraction(active.id);
+        canvas.discardActiveObject();
+        canvas.requestRenderAll();
+        return;
+      }
+      if (!editing && (event.key === 'Delete' || event.key === 'Backspace')) {
+        canvas.getActiveObjects().forEach((object) => {
+          if (!isLockedByCollaborator(object.id)) canvas.remove(object);
+        });
+        canvas.discardActiveObject();
+        canvas.requestRenderAll();
+        return;
+      }
+      if (!editing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const shortcuts: Record<string, typeof activeTool> = { v: 'select', d: 'brush', r: 'rectangle', c: 'circle', t: 'text', n: 'sticky' };
+        const tool = shortcuts[event.key.toLowerCase()];
+        if (tool) setActiveTool(tool);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
 
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      window.removeEventListener('keydown', handleKeyDown);
-      canvas.dispose();
-      fabricCanvasRef.current = null;
-      if (registerCanvasRef) {
-        registerCanvasRef(null);
-      }
-    };
-  }, [canvasObjectsMap]);
-
-  // Synchronize Yjs Map -> Fabric Canvas (Remote changes observer)
-  useEffect(() => {
-    if (!canvasObjectsMap || !fabricCanvasRef.current) return;
-    const canvas = fabricCanvasRef.current;
-
-    console.log('[Yjs-Sync] Initializing Y.Doc map observer...');
-
-    // Synchronize initial Y.Doc state to canvas
-    isUpdatingFromYjsRef.current = true;
-    
-    // Clear local objects that are not in the Yjs map
-    canvas.getObjects().forEach((obj) => {
-      if (obj.id && !canvasObjectsMap.has(obj.id)) {
-        canvas.remove(obj);
-      }
-    });
-
-    const initialKeys = Array.from(canvasObjectsMap.keys());
-    initialKeys.forEach((key: any) => {
-      const val = canvasObjectsMap.get(key);
-      const existing = canvas.getObjects().find((o) => o.id === key);
-      
-      if (existing) {
-        existing.set(val);
-        existing.setCoords();
-      } else {
-        fabric.util.enlivenObjects([val], (enlivened) => {
-          const newObj = enlivened[0];
-          if (!newObj) return;
-          newObj.id = key;
-          newObj.creatorId = val.creatorId;
-          
-          const dup = canvas.getObjects().find((o) => o.id === key);
-          if (!dup) {
-            canvas.add(newObj);
-            canvas.renderAll();
-          }
-        });
-      }
-    });
-
-    isUpdatingFromYjsRef.current = false;
-    canvas.renderAll();
-
-    // Map Event Listener for remote updates
     const observer = (event: any) => {
-      // Ignore if transaction is local
       if (event.transaction.local) return;
-
-      console.log('[Yjs-Sync] Remote update detected. Applying changes...');
-      isUpdatingFromYjsRef.current = true;
-
-      event.keys.forEach((change: any, key: string) => {
-        if (change.action === 'add' || change.action === 'update') {
-          const val = canvasObjectsMap.get(key);
-          if (!val) return;
-
-          const existing = canvas.getObjects().find((o) => o.id === key);
-          if (existing) {
-            existing.set(val);
-            // Re-stamp custom sticky properties so object:scaled handler works on remote objects
-            if (val._isSticky) {
-              (existing as any)._isSticky = true;
-              (existing as any)._stickyBaseFontSize = val._stickyBaseFontSize ?? 16;
-              (existing as any)._stickyBaseWidth    = val._stickyBaseWidth    ?? 220;
-              (existing as any)._stickyScale        = val._stickyScale        ?? 1;
-            }
-            existing.setCoords();
-            canvas.renderAll();
-          } else {
-            fabric.util.enlivenObjects([val], (enlivened) => {
-              const newObj = enlivened[0];
-              newObj.id = key;
-              newObj.creatorId = val.creatorId;
-              // Re-stamp on freshly enlivened object
-              if (val._isSticky) {
-                (newObj as any)._isSticky = true;
-                (newObj as any)._stickyBaseFontSize = val._stickyBaseFontSize ?? 16;
-                (newObj as any)._stickyBaseWidth    = val._stickyBaseWidth    ?? 220;
-                (newObj as any)._stickyScale        = val._stickyScale        ?? 1;
-              }
-              const dup = canvas.getObjects().find((o) => o.id === key);
-              if (!dup) {
-                canvas.add(newObj);
-              } else {
-                dup.set(val);
-                dup.setCoords();
-              }
-              canvas.renderAll();
-            });
-          }
-        } else if (change.action === 'delete') {
-          const existing = canvas.getObjects().find((o) => o.id === key);
-          if (existing) {
-            canvas.remove(existing);
-            canvas.renderAll();
-          }
+      event.keys.forEach((change: { action: 'add' | 'update' | 'delete' }, key: string) => {
+        if (change.action === 'delete') applyRemoteDelete(key);
+        else {
+          const value = canvasObjectsMap?.get(key);
+          if (value) applyRemoteObject(key, value);
         }
       });
-
-      isUpdatingFromYjsRef.current = false;
+      canvas.requestRenderAll();
     };
+    if (canvasObjectsMap) {
+      canvasObjectsMap.observe(observer);
+      canvasObjectsMap.forEach((value: SerializedCanvasObject, key: string) => applyRemoteObject(key, value));
+    }
 
-    canvasObjectsMap.observe(observer);
-
+    reconcileLocksRef.current = applyInteractivity;
+    applyInteractivity();
     return () => {
-      canvasObjectsMap.unobserve(observer);
+      window.removeEventListener('resize', updateCanvasSize);
+      window.removeEventListener('keydown', handleKeyDown);
+      resizeObserver?.disconnect();
+      if (canvasObjectsMap) canvasObjectsMap.unobserve(observer);
+      collaborationRef.current?.releaseLock();
+      reconcileLocksRef.current = null;
+      canvas.dispose();
+      fabricCanvasRef.current = null;
+      objectIndexRef.current.clear();
+      lastKnownObjectsRef.current.clear();
+      historyPastRef.current = [];
+      historyFutureRef.current = [];
+      syncHistoryState();
+      registerCanvasController?.(null);
+      registerCanvasRef?.(null);
     };
   }, [canvasObjectsMap]);
 
-  // Handle active tool updates
+  useEffect(() => {
+    reconcileLocksRef.current?.();
+  }, [collaboration?.locks, activeTool]);
+
   useEffect(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-
-    if (activeTool === 'brush') {
-      canvas.isDrawingMode = true;
-      if (!canvas.freeDrawingBrush) {
-        canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-      }
+    canvas.isDrawingMode = activeTool === 'brush';
+    if (canvas.isDrawingMode) {
+      if (!canvas.freeDrawingBrush) canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
       canvas.freeDrawingBrush.color = strokeColor;
       canvas.freeDrawingBrush.width = strokeWidth;
-    } else {
-      canvas.isDrawingMode = false;
     }
-
-    const isSelectMode = activeTool === 'select';
-    canvas.forEachObject((obj) => {
-      obj.selectable = isSelectMode;
-      obj.hoverCursor = isSelectMode ? 'move' : 'crosshair';
-    });
-
-    if (!isSelectMode) {
-      canvas.discardActiveObject();
-    }
-
     canvas.requestRenderAll();
   }, [activeTool, strokeColor, strokeWidth]);
 
-  // Handle dynamic theme changes — swap canvas background AND recolor existing "theme ink" objects
   useEffect(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-
-    const bg = theme === 'light' ? '#ffffff' : '#000000';
-    canvas.setBackgroundColor(bg, () => { canvas.renderAll(); });
-
-    // Color swap table: [darkColor, lightColor]
-    // Objects drawn in these colors will be recolored to match the new theme.
-    // Accent colors (purple, red, custom) are left untouched.
-    const swapPairs: [string, string][] = [
-      ['#ffffff', '#000000'],
-      ['#f3f4f6', '#1e293b'],
-      ['#f8fafc', '#0f172a'],
-      ['#e2e8f0', '#334155'],
-    ];
-
-    const swap = (color: string | undefined | null): string | null => {
-      if (!color) return null;
-      const c = color.toLowerCase();
-      for (const [dark, light] of swapPairs) {
-        if (theme === 'light' && c === dark)  return light;
-        if (theme === 'dark'  && c === light) return dark;
-      }
-      return null; // null = no swap needed
-    };
-
-    canvas.getObjects().forEach((obj) => {
+    const background = theme === 'light' ? '#ffffff' : '#000000';
+    canvas.setBackgroundColor(background, canvas.requestRenderAll.bind(canvas));
+    historySuspendedRef.current = true;
+    canvas.getObjects().forEach((object) => {
       let changed = false;
-
-      if (obj.type === 'path' || obj.type === 'rect' || obj.type === 'circle') {
-        const newStroke = swap(obj.stroke as string);
-        if (newStroke) { obj.set('stroke', newStroke); changed = true; }
-        const newFill = obj.fill !== 'transparent' ? swap(obj.fill as string) : null;
-        if (newFill) { obj.set('fill', newFill); changed = true; }
-      } else if (obj.type === 'i-text') {
-        const newFill = swap(obj.fill as string);
-        if (newFill) { obj.set('fill', newFill); changed = true; }
+      if (object.type === 'path' || object.type === 'rect' || object.type === 'circle') {
+        const stroke = swapThemeColor(object.stroke as string, theme);
+        const fill = object.fill !== 'transparent' ? swapThemeColor(object.fill as string, theme) : null;
+        if (stroke) { object.set('stroke', stroke); changed = true; }
+        if (fill) { object.set('fill', fill); changed = true; }
+      } else if (object.type === 'i-text') {
+        const fill = swapThemeColor(object.fill as string, theme);
+        if (fill) { object.set('fill', fill); changed = true; }
       }
-      // Sticky notes (textbox) keep their locked yellow background + dark text — skip them
-
-      if (changed) {
-        obj.setCoords();
-        if (canvasObjectsMap && obj.id) {
-          canvasObjectsMap.set(
-            obj.id,
-            obj.toObject(['id', 'creatorId', 'backgroundColor', 'padding', 'shadow',
-                          '_isSticky', '_stickyBaseFontSize', '_stickyBaseWidth', '_stickyScale'])
-          );
-        }
+      if (changed && object.id && canvasObjectsMap) {
+        object.setCoords();
+        canvasObjectsMap.set(object.id, object.toObject([...CUSTOM_FABRIC_PROPS]));
+        lastKnownObjectsRef.current.set(object.id, cloneSerialized(object.toObject([...CUSTOM_FABRIC_PROPS])));
       }
     });
-
+    historySuspendedRef.current = false;
     canvas.requestRenderAll();
   }, [theme, canvasObjectsMap]);
 
-  // Sync strokeColor, fillColor, strokeWidth, and fontSize updates dynamically to selected canvas elements
   useEffect(() => {
     const canvas = fabricCanvasRef.current;
-    if (!canvas) return;
-
-    const activeObj = canvas.getActiveObject();
-    if (activeObj) {
-      let changed = false;
-
-      // Handle Sticky Notes (Textbox) properties (locked yellow background)
-      if (activeObj.type === 'textbox') {
-        if (activeObj.fontSize !== fontSize) {
-          activeObj.set('fontSize', fontSize);
-          changed = true;
-        }
-      } else if (activeObj.type === 'i-text') {
-        // Text values: fill controls color
-        if (activeObj.fill !== strokeColor) {
-          activeObj.set('fill', strokeColor);
-          changed = true;
-        }
-        if (activeObj.fontSize !== fontSize) {
-          activeObj.set('fontSize', fontSize);
-          changed = true;
-        }
-      } else {
-        // Shapes values
-        if (activeObj.stroke !== strokeColor) {
-          activeObj.set('stroke', strokeColor);
-          changed = true;
-        }
-        if (activeObj.fill !== fillColor) {
-          activeObj.set('fill', fillColor);
-          changed = true;
-        }
-        if (activeObj.strokeWidth !== strokeWidth) {
-          activeObj.set('strokeWidth', strokeWidth);
-          changed = true;
-        }
-      }
-
-      if (changed) {
-        activeObj.setCoords();
-        canvas.renderAll();
-        canvas.fire('object:modified', { target: activeObj });
-      }
+    const active = canvas?.getActiveObject();
+    if (!canvas || !active || !active.id || collaborationRef.current?.locks[active.id]) return;
+    let changed = false;
+    if (active.type === 'textbox') {
+      if ((active as any).fontSize !== fontSize) { active.set('fontSize' as any, fontSize); changed = true; }
+    } else if (active.type === 'i-text') {
+      if (active.fill !== strokeColor) { active.set('fill', strokeColor); changed = true; }
+      if ((active as any).fontSize !== fontSize) { active.set('fontSize' as any, fontSize); changed = true; }
+    } else {
+      if (active.stroke !== strokeColor) { active.set('stroke', strokeColor); changed = true; }
+      if (active.fill !== fillColor) { active.set('fill', fillColor); changed = true; }
+      if (active.strokeWidth !== strokeWidth) { active.set('strokeWidth', strokeWidth); changed = true; }
+    }
+    if (changed) {
+      active.setCoords();
+      canvas.fire('object:modified', { target: active });
+      canvas.requestRenderAll();
     }
   }, [strokeColor, fillColor, strokeWidth, fontSize]);
 
-  return (
-    <div className="canvas-wrapper">
-      <canvas ref={canvasRef} id="fabric-canvas" />
-    </div>
-  );
+  return <div ref={wrapperRef} className="canvas-wrapper"><canvas ref={canvasRef} id="fabric-canvas" /></div>;
 };

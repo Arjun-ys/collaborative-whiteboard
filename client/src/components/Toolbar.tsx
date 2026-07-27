@@ -44,13 +44,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onClearCanvas }) => {
         );
       })}
       
-      <div className="h-5 w-[1px] bg-slate-200 dark:bg-slate-850 mx-1" />
+      <div className="h-5 w-[1px] bg-slate-200 dark:bg-slate-800 mx-1" />
 
       {/* Clear Button */}
       <div className="relative group">
         <button
           onClick={onClearCanvas}
-          className="p-3 rounded-xl flex items-center justify-center text-slate-500 hover:bg-red-50 dark:hover:bg-red-950/30 dark:text-slate-400 hover:text-red-650 dark:hover:text-red-400 transition-all duration-200 hover:scale-105 active:scale-95"
+          className="p-3 rounded-xl flex items-center justify-center text-slate-500 hover:bg-red-50 dark:hover:bg-red-950/30 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 transition-all duration-200 hover:scale-105 active:scale-95"
           aria-label="Clear Canvas"
         >
           <Trash2 size={18} />

@@ -13,6 +13,7 @@ export const PropertiesPanel: React.FC = () => {
     fontSize,
     setFontSize,
     activeTool,
+    isStickySelected,
   } = useStore();
 
   const strokeColors = [
@@ -30,7 +31,7 @@ export const PropertiesPanel: React.FC = () => {
 
   const fillColors = [
     'transparent',
-    '#fef08a', // Pastel Yellow (Sticky Note Default)
+    '#fef08a', // Pastel Yellow
     '#bfdbfe', // Pastel Blue
     '#bbf7d0', // Pastel Green
     '#fbcfe8', // Pastel Pink
@@ -73,8 +74,8 @@ export const PropertiesPanel: React.FC = () => {
         </div>
       </div>
 
-      {/* Fill Color */}
-      {activeTool !== 'brush' && (
+      {/* Fill Color (Hidden for sticky notes since color is locked) */}
+      {activeTool !== 'brush' && activeTool !== 'sticky' && !isStickySelected && (
         <div className="flex flex-col gap-2.5">
           <div className="flex justify-between items-center text-xs font-semibold text-slate-500 dark:text-slate-400">
             <span>Fill / Note Color</span>
@@ -115,7 +116,7 @@ export const PropertiesPanel: React.FC = () => {
         <div className="flex flex-col gap-2">
           <div className="flex justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
             <span>Stroke Thickness</span>
-            <span className="font-mono text-purple-650 dark:text-purple-400 font-bold">{strokeWidth}px</span>
+            <span className="font-mono text-purple-600 dark:text-purple-400 font-bold">{strokeWidth}px</span>
           </div>
           <input
             type="range"
@@ -133,7 +134,7 @@ export const PropertiesPanel: React.FC = () => {
         <div className="flex flex-col gap-2">
           <div className="flex justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
             <span>Font Size</span>
-            <span className="font-mono text-purple-650 dark:text-purple-400 font-bold">{fontSize}px</span>
+            <span className="font-mono text-purple-600 dark:text-purple-400 font-bold">{fontSize}px</span>
           </div>
           <input
             type="range"

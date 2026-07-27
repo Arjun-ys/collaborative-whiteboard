@@ -1,13 +1,15 @@
 import React from 'react';
 import { useStore } from '../store/useStore';
 import { Sun, Moon, Link } from 'lucide-react';
+import { toast } from './Toast';
 
 export const ConnectionStatus: React.FC = () => {
-  const { connected, roomId, activeUsers, theme, toggleTheme } = useStore();
+  const { connectionState, roomId, activeUsers, theme, toggleTheme } = useStore();
+  const connected = connectionState === 'synced';
 
   const copyRoomLink = () => {
     navigator.clipboard.writeText(window.location.href);
-    alert('Room link copied to clipboard!');
+    toast.success('Room link copied to clipboard!');
   };
 
   return (
