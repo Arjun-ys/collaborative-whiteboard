@@ -7,6 +7,10 @@ export interface CanvasController {
   redo: () => void;
   exportPng: () => Promise<void>;
   clear: () => Promise<void>;
+  zoomIn: () => void;
+  zoomOut: () => void;
+  resetView: () => void;
+  fitToContent: () => void;
 }
 
 export interface CanvasControllerRegistration {

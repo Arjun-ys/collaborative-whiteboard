@@ -8,6 +8,7 @@ import {
   StickyNote,
   Trash2,
   Type,
+  Hand,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { ToolType } from '../store/useStore';
@@ -18,6 +19,7 @@ interface ToolRailProps {
 
 const tools: { type: ToolType; icon: React.ReactNode; label: string; shortcut: string }[] = [
   { type: 'select', icon: <MousePointer2 size={18} />, label: 'Select', shortcut: 'V' },
+  { type: 'pan', icon: <Hand size={18} />, label: 'Pan', shortcut: 'H' },
   { type: 'brush', icon: <Brush size={18} />, label: 'Draw', shortcut: 'D' },
   { type: 'rectangle', icon: <Square size={18} />, label: 'Rectangle', shortcut: 'R' },
   { type: 'circle', icon: <Circle size={18} />, label: 'Circle', shortcut: 'C' },

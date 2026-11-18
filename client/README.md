@@ -1,32 +1,20 @@
-# React + TypeScript + Vite
+# Whiteboard client
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React, TypeScript, Fabric.js, Yjs, and Zustand implement the drawing workspace.
+Start it from the project root with `npm run dev:client`, or start both services
+with `npm run dev`.
 
-Currently, two official plugins are available:
+See [the project README](../README.md) for setup, environment variables,
+architecture, collaboration guarantees, and known limits.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+From the root:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```powershell
+npm run build
+npm run test:client
+npm run lint --prefix client
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Client regression tests exercise a real headless Fabric canvas and React event
+handlers. The test runner uses the server's existing TypeScript loader, so install
+both packages before running tests. No browser or MongoDB is required.

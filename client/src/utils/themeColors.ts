@@ -2,8 +2,8 @@
  * Shared theme color swap table.
  *
  * Each pair maps a [darkModeColor, lightModeColor]. When the theme toggles,
- * objects drawn in one of these "ink" colors are recolored to remain visible
- * against the new background. Custom accent colors are left untouched.
+ * the local view resolves these ink colors against its background. Shared
+ * snapshots use dark-theme ink; custom accent colors are left untouched.
  *
  * IMPORTANT: per AGENTS.md Rule #4, both the Zustand store `toggleTheme` and
  * the Whiteboard canvas theme listener must use this shared source of truth.

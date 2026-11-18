@@ -1,63 +1,23 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { createId } from '../utils/id';
-
-interface Toast {
-  id: string;
-  message: string;
-  type: 'success' | 'info' | 'warning' | 'error';
-  duration?: number;
-}
-
-// Global toast emitter — components can call `toast.success(...)` without prop drilling
-type ToastListener = (t: Toast) => void;
-const listeners: Set<ToastListener> = new Set();
-
-const emit = (t: Toast) => listeners.forEach((fn) => fn(t));
-
-export const toast = {
-  success: (message: string, duration = 2500) =>
-    emit({ id: createId(), message, type: 'success', duration }),
-  info: (message: string, duration = 2500) =>
-    emit({ id: createId(), message, type: 'info', duration }),
-  warning: (message: string, duration = 3500) =>
-    emit({ id: createId(), message, type: 'warning', duration }),
-  error: (message: string, duration = 4000) =>
-    emit({ id: createId(), message, type: 'error', duration }),
-};
-
-// ── Confirm dialog state ──────────────────────────────────────────────
-type ConfirmResolver = (result: boolean) => void;
-let confirmState: {
-  message: string;
-  resolve: ConfirmResolver;
-} | null = null;
-const confirmListeners: Set<() => void> = new Set();
-
-export const confirmDialog = (message: string): Promise<boolean> => {
-  return new Promise((resolve) => {
-    confirmState = { message, resolve };
-    confirmListeners.forEach((fn) => fn());
-  });
-};
-
-// ── Visual Components ─────────────────────────────────────────────────
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { subscribeToToasts, subscribeToConfirmations } from '../utils/notifications';
+import type { Toast, Confirmation } from '../utils/notifications';
 
 const typeStyles: Record<Toast['type'], { bg: string; icon: string }> = {
   success: {
     bg: 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300',
-    icon: '✓',
+    icon: 'âœ“',
   },
   info: {
     bg: 'bg-sky-500/15 border-sky-500/30 text-sky-300',
-    icon: 'ℹ',
+    icon: 'â„¹',
   },
   warning: {
     bg: 'bg-amber-500/15 border-amber-500/30 text-amber-300',
-    icon: '⚠',
+    icon: 'âš ',
   },
   error: {
     bg: 'bg-red-500/15 border-red-500/30 text-red-300',
-    icon: '✕',
+    icon: 'âœ•',
   },
 };
 
@@ -85,27 +45,19 @@ const ToastItem: React.FC<{ t: Toast; onDismiss: (id: string) => void }> = ({ t,
 
 export const ToastContainer: React.FC = () => {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [confirm, setConfirm] = useState<{ message: string; resolve: ConfirmResolver } | null>(null);
+  const [confirm, setConfirm] = useState<Confirmation | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Subscribe to toast events
   useEffect(() => {
-    const handler: ToastListener = (t) => setToasts((prev) => [...prev, t]);
-    listeners.add(handler);
-    return () => { listeners.delete(handler); };
-  }, []);
+    if (!confirm) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const buttons = dialogRef.current?.querySelectorAll('button');
+    buttons?.[0]?.focus();
+    return () => previous?.focus();
+  }, [confirm]);
 
-  // Subscribe to confirm events
-  useEffect(() => {
-    const handler = () => {
-      if (confirmState) {
-        setConfirm(confirmState);
-        confirmState = null;
-      }
-    };
-    confirmListeners.add(handler);
-    return () => { confirmListeners.delete(handler); };
-  }, []);
-
+  useEffect(() => subscribeToToasts((toast) => setToasts((current) => [...current, toast])), []);
+  useEffect(() => subscribeToConfirmations(setConfirm), []);
   const dismiss = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
@@ -118,7 +70,7 @@ export const ToastContainer: React.FC = () => {
   return (
     <>
       {/* Toast stack */}
-      <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[9999] flex flex-col items-center gap-2 pointer-events-none">
+      <div role="status" aria-live="polite" aria-atomic="false" className="fixed top-6 left-1/2 -translate-x-1/2 z-[9999] flex flex-col items-center gap-2 pointer-events-none">
         {toasts.map((t) => (
           <div key={t.id} className="pointer-events-auto">
             <ToastItem t={t} onDismiss={dismiss} />
@@ -129,8 +81,20 @@ export const ToastContainer: React.FC = () => {
       {/* Confirm overlay */}
       {confirm && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/50 dark:border-slate-800/50 shadow-2xl p-6 max-w-sm w-full mx-4 flex flex-col gap-5">
-            <p className="text-sm font-medium text-slate-800 dark:text-slate-200 text-center leading-relaxed">
+          <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="clear-dialog-message"
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); handleConfirm(false); }
+              if (event.key === 'Tab') {
+                event.preventDefault();
+                const buttons = dialogRef.current?.querySelectorAll('button');
+                if (!buttons?.length) return;
+                const index = Array.from(buttons).indexOf(document.activeElement as HTMLButtonElement);
+                buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus();
+              }
+            }}
+            className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/50 dark:border-slate-800/50 shadow-2xl p-6 max-w-sm w-full mx-4 flex flex-col gap-5">
+            <p id="clear-dialog-message" className="text-sm font-medium text-slate-800 dark:text-slate-200 text-center leading-relaxed">
               {confirm.message}
             </p>
             <div className="flex gap-3">

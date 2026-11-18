@@ -7,10 +7,11 @@ import { ToastContainer } from './components/Toast';
 import { useYjs } from './hooks/useYjs';
 import { useStore } from './store/useStore';
 import type { CanvasController } from './types/whiteboard';
+import { ViewportControls } from './components/ViewportControls';
 
 function App() {
   const [canvasController, setCanvasController] = useState<CanvasController | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(() => !window.matchMedia('(pointer: coarse), (max-width: 900px)').matches);
   const { theme } = useStore();
 
   // Apply Tailwind dark mode class dynamically to the root DOM node
@@ -38,6 +39,7 @@ function App() {
             collaboration={collaboration}
             registerCanvasController={setCanvasController}
           />
+          <ViewportControls controller={canvasController} />
         </main>
         <InspectorPanel isOpen={inspectorOpen} onToggle={() => setInspectorOpen((open) => !open)} />
       </div>

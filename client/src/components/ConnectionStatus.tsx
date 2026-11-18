@@ -1,7 +1,7 @@
 import React from 'react';
 import { useStore } from '../store/useStore';
 import { Sun, Moon, Link } from 'lucide-react';
-import { toast } from './Toast';
+import { toast } from '../utils/notifications';
 
 export const ConnectionStatus: React.FC = () => {
   const { connectionState, roomId, activeUsers, theme, toggleTheme } = useStore();

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { CanvasController } from '../types/whiteboard';
-import { toast } from './Toast';
+import { toast } from '../utils/notifications';
 
 interface WorkspaceHeaderProps {
   controller: CanvasController | null;
@@ -96,11 +96,11 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({ controller }) 
           </button>
         </div>
 
-        <button className="secondary-button share-button" onClick={copyRoomLink}>
+        <button className="secondary-button share-button" onClick={copyRoomLink} aria-label="Copy room link">
           {copied ? <Check size={15} /> : <Link2 size={15} />}
           <span>{copied ? 'Copied' : 'Share'}</span>
         </button>
-        <button className="secondary-button export-button" onClick={controller?.exportPng} disabled={!controller}>
+        <button className="secondary-button export-button" onClick={controller?.exportPng} disabled={!controller} aria-label="Export PNG">
           <Download size={15} />
           <span>Export</span>
         </button>

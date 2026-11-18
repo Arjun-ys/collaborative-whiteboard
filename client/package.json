@@ -19,16 +19,19 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/fabric": "^5.3.0",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
-    "autoprefixer": "^10.5.2",
     "oxlint": "^1.69.0",
     "postcss": "^8.5.15",
-    "tailwindcss": "^3.4.17",
+    "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",
-    "vite": "^5.4.11"
+    "vite": "^6.4.4"
+  },
+  "overrides": {
+    "canvas": "^3.2.3"
   }
 }

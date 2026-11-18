@@ -22,10 +22,12 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({ isOpen, onToggle
     setFontSize,
     activeTool,
     isStickySelected,
+    selectedObjectType,
   } = useStore();
 
-  const showFill = activeTool !== 'brush' && activeTool !== 'sticky' && !isStickySelected;
-  const showFont = activeTool === 'text' || activeTool === 'sticky' || isStickySelected;
+  const textSelected = selectedObjectType === 'i-text' || selectedObjectType === 'textbox';
+  const showFill = activeTool !== 'brush' && activeTool !== 'text' && activeTool !== 'sticky' && !textSelected;
+  const showFont = activeTool === 'text' || activeTool === 'sticky' || textSelected;
   const activeLabel = activeTool === 'select' ? 'Selection' : activeTool[0].toUpperCase() + activeTool.slice(1);
 
   if (!isOpen) {
@@ -45,7 +47,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({ isOpen, onToggle
 
       <div className="inspector-body">
         <section className="setting-section">
-          <div className="setting-label-row"><span>Stroke</span><code>{strokeColor}</code></div>
+          <div className="setting-label-row"><span>{showFont ? 'Text color' : 'Stroke'}</span><code>{strokeColor}</code></div>
           <div className="swatch-grid" role="group" aria-label="Stroke color">
             {strokeColors.map((color) => <button key={color} className={`color-swatch ${strokeColor === color ? 'is-selected' : ''}`} style={{ backgroundColor: color }} onClick={() => setStrokeColor(color)} aria-label={`Set stroke color ${color}`} aria-pressed={strokeColor === color} />)}
           </div>
@@ -60,7 +62,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({ isOpen, onToggle
           </section>
         )}
 
-        {activeTool !== 'sticky' && (
+        {!showFont && !isStickySelected && (
           <section className="setting-section slider-section">
             <div className="setting-label-row"><span>Thickness</span><strong>{strokeWidth}px</strong></div>
             <input type="range" min="1" max="30" value={strokeWidth} onChange={(event) => setStrokeWidth(Number(event.target.value))} aria-label="Stroke thickness" />
@@ -75,7 +77,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({ isOpen, onToggle
         )}
       </div>
 
-      <div className="inspector-footer"><Edit3 size={14} /><span>Click the canvas to create</span></div>
+      <div className="inspector-footer"><Edit3 size={14} /><span>{selectedObjectType ? 'Edit the selected object' : activeTool === 'select' ? 'Select an object to edit' : 'Click the canvas to create'}</span></div>
     </aside>
   );
 };

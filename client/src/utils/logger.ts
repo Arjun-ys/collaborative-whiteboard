@@ -7,7 +7,7 @@
  * on a busy collaborative board.
  */
 
-const IS_DEV = import.meta.env.DEV;
+const IS_DEV = import.meta.env?.DEV ?? false;
 
 export const logger = {
   log: IS_DEV ? console.log.bind(console) : () => {},

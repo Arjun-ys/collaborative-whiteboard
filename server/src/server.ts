@@ -1,36 +1,44 @@
-import express from 'express';
 import http from 'http';
-import cors from 'cors';
+import path from 'path';
 import { WebSocketServer } from 'ws';
-import { setupWSConnection, setPersistence } from 'y-websocket/bin/utils';
-import { connectDB, mongodbPersistence } from './services/db';
+import { setPersistence, getYDoc, docs } from 'y-websocket/bin/utils';
+import { connectDB, boardStorage } from './services/db';
+import { RoomPersistence } from './services/roomPersistence';
+import { connectRoom } from './services/roomConnection';
+import mongoose from 'mongoose';
 import dotenv from 'dotenv';
+import { createApp } from './app';
+import { allowedOriginsFromEnv, permittedWsOrigin, validRoomPath } from './services/connectionPolicy';
 
 dotenv.config();
 
-const app = express();
 const port = process.env.PORT || 5001;
-
-app.use(cors());
-app.use(express.json());
-
-// Basic Server Health Check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', message: 'Whiteboard Server is active', time: new Date() });
+const allowedOrigins = allowedOriginsFromEnv(process.env.ALLOWED_ORIGINS);
+const app = createApp({
+  clientDirectory: path.resolve(__dirname, '../../client/dist'),
+  isDatabaseReady: () => mongoose.connection.readyState === 1,
+  pendingRooms: () => persistence.pendingRooms,
+  allowedOrigins,
 });
 
 // Create standard HTTP server wrapping Express
 const server = http.createServer(app);
 
 // Create WebSocket server matching y-websocket expectations
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
 
-// Bind the MongoDB Persistence adapter to y-websocket
-setPersistence(mongodbPersistence);
+// Own hydration and collection: the library adapter does not await loading.
+setPersistence(null);
+const persistence = new RoomPersistence(boardStorage, {
+  createDoc: (name) => getYDoc(name),
+  disposeDoc: (name, doc) => { if (docs.get(name) === doc) docs.delete(name); },
+  onError: (error, name) => console.error(`[DB] Save failed for room ${name}; retaining state for retry.`, error),
+});
+let shuttingDown = false;
 
 wss.on('connection', (ws, req) => {
-  console.log(`[WS] New connection requested from URL: ${req.url}`);
-  setupWSConnection(ws, req);
+  void connectRoom(ws, req, persistence, () => shuttingDown,
+    (error) => console.error('[WS] Room connection failed:', error));
 });
 
 // Intercept Upgrade requests and route them to WebSocket server safely
@@ -42,7 +50,7 @@ server.on('upgrade', (request, socket, head) => {
     console.error('[Server] Upgrade URL parsing error:', e);
   }
   
-  if (pathname !== '/health') {
+  if (!shuttingDown && wss.clients.size < 128 && validRoomPath(pathname) && permittedWsOrigin(request, allowedOrigins, process.env.NODE_ENV !== 'production')) {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
     });
@@ -62,4 +70,24 @@ const start = async () => {
 
 start().catch((err) => {
   console.error('[Server] Startup error:', err);
+  process.exitCode = 1;
 });
+
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  server.close();
+  for (const ws of wss.clients) ws.terminate();
+  try {
+    await persistence.flushAll();
+    await mongoose.disconnect();
+    for (const doc of docs.values()) doc.destroy();
+    docs.clear();
+    console.log('[Server] Pending board state flushed.');
+  } catch (error) {
+    console.error('[Server] Shutdown flush failed; retaining process for retry.', error);
+    setTimeout(() => { shuttingDown = false; void shutdown(); }, 2500);
+  }
+};
+process.on('SIGINT', () => void shutdown());
+process.on('SIGTERM', () => void shutdown());

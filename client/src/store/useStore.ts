@@ -3,7 +3,7 @@ import { swapThemeColor } from '../utils/themeColors';
 import { createId } from '../utils/id';
 import type { ConnectionState } from '../types/collaboration';
 
-export type ToolType = 'select' | 'brush' | 'rectangle' | 'circle' | 'text' | 'sticky';
+export type ToolType = 'select' | 'pan' | 'brush' | 'rectangle' | 'circle' | 'text' | 'sticky';
 
 interface WhiteboardState {
   activeTool: ToolType;
@@ -18,8 +18,12 @@ interface WhiteboardState {
   activeUsers: number;
   theme: 'light' | 'dark';
   isStickySelected: boolean;
+  selectedObjectType: string | null;
+  propertyRevision: number;
   canUndo: boolean;
   canRedo: boolean;
+  zoom: number;
+  setZoom: (zoom: number) => void;
   
   setActiveTool: (tool: ToolType) => void;
   setStrokeColor: (color: string) => void;
@@ -33,6 +37,7 @@ interface WhiteboardState {
   setActiveUsers: (count: number) => void;
   toggleTheme: () => void;
   setIsStickySelected: (val: boolean) => void;
+  setSelectionProperties: (values: { selectedObjectType: string | null; strokeColor?: string; fillColor?: string; strokeWidth?: number; fontSize?: number }) => void;
   setHistoryState: (state: { canUndo: boolean; canRedo: boolean }) => void;
 }
 
@@ -69,20 +74,25 @@ export const useStore = create<WhiteboardState>((set) => ({
   activeUsers: 1,
   theme: 'dark', // default theme is dark
   isStickySelected: false,
+  selectedObjectType: null,
+  propertyRevision: 0,
   canUndo: false,
   canRedo: false,
+  zoom: 1,
+  setZoom: (zoom) => set({ zoom }),
 
   setActiveTool: (tool) => set({ activeTool: tool }),
-  setStrokeColor: (color) => set({ strokeColor: color }),
-  setFillColor: (color) => set({ fillColor: color }),
-  setStrokeWidth: (width) => set({ strokeWidth: width }),
-  setFontSize: (size) => set({ fontSize: size }),
+  setStrokeColor: (color) => set((state) => ({ strokeColor: color, propertyRevision: state.propertyRevision + 1 })),
+  setFillColor: (color) => set((state) => ({ fillColor: color, propertyRevision: state.propertyRevision + 1 })),
+  setStrokeWidth: (width) => set((state) => ({ strokeWidth: width, propertyRevision: state.propertyRevision + 1 })),
+  setFontSize: (size) => set((state) => ({ fontSize: size, propertyRevision: state.propertyRevision + 1 })),
   setRoomId: (id) => set({ roomId: id }),
   setConnectionState: (connectionState) => set({ connectionState }),
   setUserId: (id) => set({ userId: id }),
   setUserName: (name) => set({ userName: name }),
   setActiveUsers: (count) => set({ activeUsers: count }),
   setIsStickySelected: (val) => set({ isStickySelected: val }),
+  setSelectionProperties: (values) => set(values),
   setHistoryState: (historyState) => set(historyState),
   
   // Swap pairs are imported from utils/themeColors (single source of truth — AGENTS.md Rule #4)
